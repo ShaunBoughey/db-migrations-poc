@@ -1,0 +1,50 @@
+services:
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: poc_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Simulates a pre-existing GCP schema. Postgres runs *.sql files here
+      # once, on first cluster init only (i.e. when pgdata volume is empty).
+      - ./legacy:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d poc_db"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  migrator:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      FLYWAY_URL: jdbc:postgresql://db:5432/poc_db
+      FLYWAY_USER: user
+      FLYWAY_PASSWORD: password
+      FLYWAY_LOCATIONS: "filesystem:/flyway/sql"
+      # Baseline behaviour: on first run against a DB that already contains
+      # objects (no Flyway history table yet), create the history table with
+      # a baseline row at BASELINE_VERSION and skip any scripts <= that
+      # version. All POC scripts are 2026.1.1+, so they apply; legacy schema
+      # at "2026.0.0" is treated as already in place.
+      FLYWAY_BASELINE_ON_MIGRATE: "true"
+      FLYWAY_BASELINE_VERSION: "2026.0.0"
+      FLYWAY_BASELINE_DESCRIPTION: "Pre-Flyway baseline (legacy schema)"
+      # Strictly-monotonic versions only. A script with a version below the
+      # current schema version will cause Flyway to abort on validate.
+      # Do NOT enable outOfOrder — it produces non-reproducible deploys.
+      FLYWAY_OUT_OF_ORDER: "false"
+    # Ordering invariant is encoded into the version numbers themselves:
+    # master → X.Y.Z.1, client → X.Y.Z.2. Flyway's natural version sort
+    # guarantees master runs before client within each logical release.
+    # No entrypoint override needed — the image's default CMD is
+    # `flyway info migrate`. Cloud Run Jobs just run the image.
+
+volumes:
+  pgdata:
